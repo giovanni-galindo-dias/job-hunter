@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Job Hunter</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+<div class="app-shell">
+
+  <!-- ===== Header ===== -->
+  <header>
+    <div class="logo">
+      <span class="logo-icon">🎯</span>
+      Job <span>Hunter</span>
+    </div>
+    <nav>
+      <button class="nav-btn active" data-page="jobs">
+        <span>🔍</span> <span>Vagas</span>
+      </button>
+      <button class="nav-btn" data-page="kanban">
+        <span>📋</span> <span>Kanban</span>
+      </button>
+      <button class="nav-btn" data-page="answers">
+        <span>💬</span> <span>Respostas</span>
+      </button>
+      <button class="nav-btn" data-page="letter">
+        <span>✉</span> <span>Carta</span>
+      </button>
+    </nav>
+  </header>
+
+  <!-- ===== Main ===== -->
+  <main>
+
+    <!-- ======================================================
+         PAGE 1 — VAGAS
+         ====================================================== -->
+    <div class="page active" id="page-jobs">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Painel de Vagas</div>
+          <div class="page-sub">7 fontes: Google Jobs · Adzuna · JSearch · Arbeitnow · Remotive · RemoteOK · The Muse</div>
+        </div>
+      </div>
+
+      <div class="search-bar">
+        <select id="sort-select">
+          <option value="seniority">Ordenar por senioridade + fit</option>
+          <option value="fit">Ordenar por fit</option>
+          <option value="date">Ordenar por data</option>
+        </select>
+        <button class="btn btn-secondary" id="cache-btn" title="Carrega resultados salvos sem chamar APIs">
+          📦 Carregar cache
+        </button>
+        <button class="btn btn-primary" id="search-btn">🔍 Nova busca nas APIs</button>
+      </div>
+
+      <div class="search-bar" style="margin-top:-10px;margin-bottom:8px">
+        <label class="toggle-row">
+          <input type="checkbox" id="show-ambiguous-toggle" />
+          Mostrar vagas ambíguas (sem nível explícito, score 40)
+        </label>
+      </div>
+
+      <div class="stats-bar" id="jobs-stats"></div>
+      <div id="source-stats" style="margin-bottom:16px"></div>
+
+      <div class="jobs-grid" id="jobs-grid">
+        <div class="loader" style="grid-column:1/-1">
+          <div class="spinner"></div>
+          <span>Inicializando busca…</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ======================================================
+         PAGE 2 — KANBAN
+         ====================================================== -->
+    <div class="page" id="page-kanban">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Rastreador de Candidaturas</div>
+          <div class="page-sub">Arraste os cards entre as colunas para atualizar o status</div>
+        </div>
+        <button class="btn btn-secondary" onclick="loadKanban()">↺ Atualizar</button>
+      </div>
+
+      <div class="kanban-board" id="kanban-board">
+        <div class="loader" style="grid-column:1/-1">
+          <div class="spinner"></div>
+          <span>Carregando…</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ======================================================
+         PAGE 3 — RESPOSTAS
+         ====================================================== -->
+    <div class="page" id="page-answers">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Banco de Respostas Prontas</div>
+          <div class="page-sub">Clique em "Copiar" e cole direto no formulário da vaga</div>
+        </div>
+      </div>
+
+      <div class="cat-filter" id="cat-filter"></div>
+      <div class="answers-grid" id="answers-grid">
+        <div class="loader" style="grid-column:1/-1">
+          <div class="spinner"></div><span>Carregando…</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ======================================================
+         PAGE 4 — CARTA DE APRESENTAÇÃO
+         ====================================================== -->
+    <div class="page" id="page-letter">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Gerador de Carta de Apresentação</div>
+          <div class="page-sub">Cole o texto da vaga e gere um texto personalizado em português</div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-secondary" id="cl-clear-btn">🗑 Limpar</button>
+          <button class="btn btn-secondary" id="cl-copy-btn">📋 Copiar carta</button>
+          <button class="btn btn-primary" id="cl-generate-btn">✨ Gerar Carta</button>
+        </div>
+      </div>
+
+      <div class="cl-layout">
+        <!-- Input -->
+        <div class="cl-panel">
+          <h3>📄 Dados da Vaga</h3>
+          <div class="form-group">
+            <label>Título do cargo</label>
+            <input id="cl-title" type="text" placeholder="ex: Analista de Suporte Junior" />
+          </div>
+          <div class="form-group">
+            <label>Empresa</label>
+            <input id="cl-company" type="text" placeholder="ex: Empresa XYZ" />
+          </div>
+          <div class="form-group">
+            <label>Descrição completa da vaga *</label>
+            <textarea id="cl-description" rows="12"
+              placeholder="Cole aqui o texto completo da vaga (requisitos, responsabilidades, etc.)…"></textarea>
+          </div>
+          <button class="btn btn-primary" id="cl-generate-btn-2" onclick="generateLetter()" style="width:100%">
+            ✨ Gerar Carta de Apresentação
+          </button>
+        </div>
+
+        <!-- Output -->
+        <div class="cl-panel">
+          <h3>✉ Carta Gerada</h3>
+          <div class="cl-output placeholder" id="cl-output">A carta gerada aparecerá aqui…</div>
+          <div style="display:flex;justify-content:flex-end;margin-top:12px">
+            <button class="btn btn-secondary" onclick="copyLetter()">📋 Copiar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- ===== Modal Notas ===== -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="modal-title">Notas</span>
+      <button class="modal-close" id="modal-close-btn">✕</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="modal-notes-id" />
+      <div class="form-group">
+        <label>Suas anotações sobre esta vaga</label>
+        <textarea id="modal-notes-ta" rows="5"
+          placeholder="ex: Enviei o LinkedIn no dia 10/06, aguardando retorno…"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="modal-cancel-btn" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" id="modal-save-btn">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Toast Container ===== -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
