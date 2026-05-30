@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from profile import PROFILE
-from services.aggregator import aggregate_jobs, load_from_cache, _sort_jobs
+from services.aggregator import aggregate_jobs, load_from_cache, _sort_jobs, run_diagnostics
 from services.matcher import score_fit
 from services.seniority_filter import compute_seniority
 
@@ -47,6 +47,15 @@ def get_cache(
     if not cached:
         return {"jobs": [], "stats": {}, "message": "Cache vazio — clique em 'Nova busca nas APIs'."}
     return _build_response(cached, show_ambiguous)
+
+
+@router.get("/debug")
+async def debug_pipeline():
+    """
+    Roda coleta completa e retorna contagens por estágio + por coletor.
+    Não persiste no cache. Use para diagnosticar problemas de volume.
+    """
+    return await run_diagnostics()
 
 
 @router.delete("/cache")

@@ -1,22 +1,21 @@
 """
-Orquestrador central de vagas.
+Orquestrador central de vagas — com logging completo de funil.
 
-Pipeline:
-  1. Executa todos os coletores em PARALELO (asyncio.gather).
-  2. Achata os resultados em uma lista única.
-  3. Deduplica por (título normalizado, empresa normalizada).
-  4. Geo-filter opcional: prioriza ou restringe a vagas no Brasil.
-  5. Aplica filtragem de senioridade (4 camadas).
-  6. Calcula fit_score e seniority_score.
-  7. Marca vagas com menos de 48h como "is_new" (prioridade de candidatura).
-  8. Persiste no cache SQLite (upsert por id).
-  9. Retorna vagas + estatísticas por fonte.
+Pipeline e contagens por estágio:
+  [coletor] raw=N  (ou error=...)
+  flatten=N
+  pos_dedup=N
+  pos_geo_filter=N
+  pos_seniority=N
+  final=N
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+import traceback
 from datetime import datetime, timezone, timedelta
 
 from sqlalchemy.orm import Session
@@ -27,21 +26,40 @@ from models import CollectedJob
 from services.matcher import score_fit
 from services.seniority_filter import compute_seniority, DEFAULT_MIN_SCORE, AMBIGUOUS_MIN_SCORE
 
+log = logging.getLogger("job_hunter.aggregator")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
 
 # ── Geo-filter ────────────────────────────────────────────────────────────────
 
 _BR_LOCATION_KW = {
-    "brasil", "brazil", "br", "são paulo", "sp", "rio de janeiro", "rj",
-    "minas gerais", "mg", "belo horizonte", "porto alegre", "curitiba",
-    "salvador", "recife", "fortaleza", "guaratinguetá", "campinas",
-    "remoto", "remote", "híbrido", "hybrid",
+    "brasil", "brazil",
+    "são paulo", "sp", "sao paulo",
+    "rio de janeiro", "rj",
+    "minas gerais", "mg", "belo horizonte",
+    "porto alegre", "rs", "curitiba", "pr",
+    "salvador", "ba", "recife", "pe", "fortaleza", "ce",
+    "brasília", "brasilia", "df", "distrito federal",
+    "guaratinguetá", "guaratingueta", "campinas",
+    "remoto", "remoto (brasil)", "remoto brasil",
+    "remote", "híbrido", "hibrido", "hybrid",
 }
 
 
 def _is_brazil_job(source: str, location: str) -> bool:
-    """True se a vaga é de fonte BR nativa ou a localização indica Brasil."""
+    """
+    True se:
+     - fonte é nativamente brasileira (Gupy, Adzuna)
+     - OU localização contém keyword de cidade/estado BR
+    Falha-aberta: location vazia de fonte nativa ainda é BR.
+    """
     if source in BR_NATIVE_SOURCES:
         return True
+    if not location:
+        return False
     loc = location.lower()
     return any(kw in loc for kw in _BR_LOCATION_KW)
 
@@ -49,7 +67,6 @@ def _is_brazil_job(source: str, location: str) -> bool:
 # ── 48h detector ─────────────────────────────────────────────────────────────
 
 def _is_recent(posted_at: str) -> bool:
-    """True se a vaga foi publicada nas últimas 48 horas."""
     if not posted_at:
         return False
     try:
@@ -62,14 +79,14 @@ def _is_recent(posted_at: str) -> bool:
 # ── Deduplicação ──────────────────────────────────────────────────────────────
 
 _SOURCE_PRIORITY = {
-    "Gupy":       1,  # BR #1
-    "Google Jobs":2,
-    "Adzuna":     3,
-    "JSearch":    4,
-    "Remotive":   5,
-    "RemoteOK":   6,
-    "Arbeitnow":  7,
-    "The Muse":   8,
+    "Gupy":        1,
+    "Google Jobs": 2,
+    "Adzuna":      3,
+    "JSearch":     4,
+    "Remotive":    5,
+    "RemoteOK":    6,
+    "Arbeitnow":   7,
+    "The Muse":    8,
 }
 
 
@@ -80,7 +97,6 @@ def _norm(text: str) -> str:
 
 
 def _dedup(jobs: list[RawJob]) -> list[RawJob]:
-    """Mantém uma vaga por (título_norm, empresa_norm), preferindo fonte de maior prioridade."""
     seen: dict[tuple, RawJob] = {}
     for job in jobs:
         key = (_norm(job.title), _norm(job.company))
@@ -94,6 +110,39 @@ def _dedup(jobs: list[RawJob]) -> list[RawJob]:
     return list(seen.values())
 
 
+# ── Coleta paralela com logging ───────────────────────────────────────────────
+
+async def _collect_all() -> tuple[list[RawJob], dict[str, dict]]:
+    """
+    Executa todos os coletores em paralelo.
+    Erros são capturados POR COLETOR (nunca derrubam a busca inteira)
+    e logados com traceback.
+    """
+    tasks = [c.collect([]) for c in COLLECTORS]
+    results: list[CollectorResult] = await asyncio.gather(*tasks)
+
+    all_raw: list[RawJob] = []
+    source_stats: dict[str, dict] = {}
+
+    for res in results:
+        stat: dict = {
+            "collected": len(res.jobs),
+            "error":     res.error,
+            "is_br":     res.name in BR_NATIVE_SOURCES,
+        }
+        source_stats[res.name] = stat
+
+        if res.error:
+            log.warning("[%s] FALHOU: %s", res.name, res.error)
+        else:
+            log.info("[%s] raw=%d", res.name, len(res.jobs))
+
+        all_raw.extend(res.jobs)
+
+    log.info("flatten=%d", len(all_raw))
+    return all_raw, source_stats
+
+
 # ── Pipeline principal ────────────────────────────────────────────────────────
 
 async def aggregate_jobs(
@@ -101,71 +150,67 @@ async def aggregate_jobs(
     brazil_only: bool = False,
     db: Session | None = None,
 ) -> dict:
-    """
-    Coleta vagas de todas as fontes em paralelo, filtra e retorna.
-
-    brazil_only=True → descarta vagas sem localização BR (exceto fontes nativas BR)
-    """
-    tasks = [c.collect([]) for c in COLLECTORS]
-    results: list[CollectorResult] = await asyncio.gather(*tasks)
-
-    all_raw: list[RawJob] = []
-    source_stats: dict[str, dict] = {}
-    for res in results:
-        source_stats[res.name] = {
-            "collected": len(res.jobs),
-            "error": res.error,
-            "is_br": res.name in BR_NATIVE_SOURCES,
-        }
-        all_raw.extend(res.jobs)
-
+    all_raw, source_stats = await _collect_all()
     total_collected = len(all_raw)
 
-    # Geo-filter (opcional)
+    # Geo-filter (opcional — quando brazil_only=False não descarta nada)
     if brazil_only:
+        before_geo = len(all_raw)
         all_raw = [j for j in all_raw if _is_brazil_job(j.source, j.location)]
+        log.info("pos_geo_filter=%d (descartados=%d)", len(all_raw), before_geo - len(all_raw))
+    else:
+        log.info("geo_filter=skip (brazil_only=False)")
 
     # Deduplicação
     unique = _dedup(all_raw)
     total_deduped = len(unique)
+    log.info("pos_dedup=%d", total_deduped)
 
     # Score + filtro de senioridade
     min_score = AMBIGUOUS_MIN_SCORE if show_ambiguous else DEFAULT_MIN_SCORE
+    discarded_seniority = 0
     processed: list[dict] = []
+
     for raw in unique:
         seniority = compute_seniority(raw.title, raw.description)
         if seniority.seniority_score < min_score:
+            discarded_seniority += 1
             continue
         fit = score_fit(raw.title, raw.description)
         is_br = _is_brazil_job(raw.source, raw.location)
         is_new = _is_recent(raw.posted_at)
 
         processed.append({
-            "id":               raw.job_id,
-            "title":            raw.title,
-            "company":          raw.company,
-            "location":         raw.location,
-            "url":              raw.url,
-            "description":      raw.description[:2000],
-            "source":           raw.source,
-            "posted_at":        raw.posted_at,
-            "is_br":            is_br,
-            "is_new":           is_new,
-            "fit_score":        fit["fit_score"],
-            "matched_skills":   fit["matched_skills"],
-            "role_type":        fit["role_type"],
-            "seniority_score":  seniority.seniority_score,
-            "seniority_label":  seniority.seniority_label,
-            "level_signals":    seniority.signals,
+            "id":              raw.job_id,
+            "title":           raw.title,
+            "company":         raw.company,
+            "location":        raw.location,
+            "url":             raw.url,
+            "description":     raw.description[:2000],
+            "source":          raw.source,
+            "posted_at":       raw.posted_at,
+            "is_br":           is_br,
+            "is_new":          is_new,
+            "fit_score":       fit["fit_score"],
+            "matched_skills":  fit["matched_skills"],
+            "role_type":       fit["role_type"],
+            "seniority_score": seniority.seniority_score,
+            "seniority_label": seniority.seniority_label,
+            "level_signals":   seniority.signals,
         })
 
     total_filtered = len(processed)
+    log.info(
+        "pos_seniority=%d (descartados=%d, min_score=%d)",
+        total_filtered, discarded_seniority, min_score,
+    )
+    log.info("final=%d", total_filtered)
 
     # Ordenação: novas BR primeiro → seniority DESC → fit DESC
     processed.sort(
         key=lambda j: (
-            j["is_new"],       # novas primeiro
-            j["is_br"],        # BR primeiro
+            j["is_new"],
+            j["is_br"],
             j["seniority_score"],
             j["fit_score"],
         ),
@@ -181,8 +226,70 @@ async def aggregate_jobs(
         "total_collected": total_collected,
         "total_deduped":   total_deduped,
         "total_filtered":  total_filtered,
+        # diagnóstico extra
+        "discarded_seniority": discarded_seniority,
     }
 
+
+# ── Diagnóstico completo ──────────────────────────────────────────────────────
+
+async def run_diagnostics() -> dict:
+    """
+    Executa coleta completa e devolve contagens por estágio + por coletor.
+    Exposto em GET /api/jobs/debug — não persiste no cache.
+    """
+    log.info("=== DIAGNÓSTICO INICIADO ===")
+    all_raw, source_stats = await _collect_all()
+
+    # Dedup sem geo-filter
+    unique_all = _dedup(all_raw)
+
+    # Geo-filter
+    br_only = [j for j in unique_all if _is_brazil_job(j.source, j.location)]
+
+    # Seniority com threshold padrão
+    passed_default: list[dict] = []
+    passed_ambiguous: list[dict] = []
+    discarded: list[dict] = []
+
+    for raw in unique_all:
+        s = compute_seniority(raw.title, raw.description)
+        entry = {
+            "title":           raw.title,
+            "company":         raw.company,
+            "source":          raw.source,
+            "seniority_score": s.seniority_score,
+            "seniority_label": s.seniority_label,
+            "signals":         s.signals,
+            "is_br":           _is_brazil_job(raw.source, raw.location),
+        }
+        if s.seniority_score >= DEFAULT_MIN_SCORE:
+            passed_default.append(entry)
+        elif s.seniority_score >= AMBIGUOUS_MIN_SCORE:
+            passed_ambiguous.append(entry)
+        else:
+            discarded.append(entry)
+
+    log.info("=== DIAGNÓSTICO CONCLUÍDO ===")
+    return {
+        "pipeline": {
+            "flatten":          len(all_raw),
+            "pos_dedup":        len(unique_all),
+            "pos_geo_br_only":  len(br_only),
+            "pos_seniority_default":   len(passed_default),
+            "pos_seniority_ambiguous": len(passed_default) + len(passed_ambiguous),
+            "discarded_seniority":     len(discarded),
+            "DEFAULT_MIN_SCORE":       DEFAULT_MIN_SCORE,
+            "AMBIGUOUS_MIN_SCORE":     AMBIGUOUS_MIN_SCORE,
+        },
+        "sources": source_stats,
+        "samples_passed": passed_default[:5],
+        "samples_discarded": discarded[:5],
+        "samples_ambiguous": passed_ambiguous[:5],
+    }
+
+
+# ── Cache helpers ─────────────────────────────────────────────────────────────
 
 def load_from_cache(
     db: Session,
@@ -205,7 +312,11 @@ def load_from_cache(
     for j in jobs:
         src = j["source"]
         if src not in source_counts:
-            source_counts[src] = {"collected": 0, "error": None, "is_br": j.get("is_br", False)}
+            source_counts[src] = {
+                "collected": 0,
+                "error": None,
+                "is_br": j.get("is_br", False),
+            }
         source_counts[src]["collected"] += 1
 
     return {
@@ -222,12 +333,23 @@ def _sort_jobs(jobs: list[dict], sort: str) -> None:
     if sort == "fit":
         jobs.sort(key=lambda j: j["fit_score"], reverse=True)
     elif sort == "date":
-        jobs.sort(key=lambda j: (j.get("is_new", False), j.get("posted_at", "")), reverse=True)
-    elif sort == "brazil":
-        jobs.sort(key=lambda j: (j.get("is_br", False), j["seniority_score"], j["fit_score"]), reverse=True)
-    else:  # seniority (padrão)
         jobs.sort(
-            key=lambda j: (j.get("is_new", False), j.get("is_br", False), j["seniority_score"], j["fit_score"]),
+            key=lambda j: (j.get("is_new", False), j.get("posted_at", "")),
+            reverse=True,
+        )
+    elif sort == "brazil":
+        jobs.sort(
+            key=lambda j: (j.get("is_br", False), j["seniority_score"], j["fit_score"]),
+            reverse=True,
+        )
+    else:
+        jobs.sort(
+            key=lambda j: (
+                j.get("is_new", False),
+                j.get("is_br", False),
+                j["seniority_score"],
+                j["fit_score"],
+            ),
             reverse=True,
         )
 
