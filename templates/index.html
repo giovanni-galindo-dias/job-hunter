@@ -43,26 +43,31 @@
       <div class="page-header">
         <div>
           <div class="page-title">Painel de Vagas</div>
-          <div class="page-sub">7 fontes: Google Jobs · Adzuna · JSearch · Arbeitnow · Remotive · RemoteOK · The Muse</div>
+          <div class="page-sub">8 fontes: 🇧🇷 Gupy · Google Jobs · Adzuna · JSearch · Arbeitnow · Remotive · RemoteOK · The Muse</div>
         </div>
       </div>
 
       <div class="search-bar">
         <select id="sort-select">
-          <option value="seniority">Ordenar por senioridade + fit</option>
-          <option value="fit">Ordenar por fit</option>
-          <option value="date">Ordenar por data</option>
+          <option value="seniority">🎯 Melhor fit (senioridade + fit)</option>
+          <option value="date">🕐 Mais recentes primeiro</option>
+          <option value="brazil">🇧🇷 Brasil primeiro</option>
+          <option value="fit">📊 Maior fit</option>
         </select>
-        <button class="btn btn-secondary" id="cache-btn" title="Carrega resultados salvos sem chamar APIs">
+        <button class="btn btn-secondary" id="cache-btn" title="Carrega resultados salvos sem re-buscar nas APIs">
           📦 Carregar cache
         </button>
         <button class="btn btn-primary" id="search-btn">🔍 Nova busca nas APIs</button>
       </div>
 
-      <div class="search-bar" style="margin-top:-10px;margin-bottom:8px">
+      <div class="search-bar" style="margin-top:-10px;margin-bottom:8px;gap:20px">
+        <label class="toggle-row">
+          <input type="checkbox" id="brazil-only-toggle" />
+          🇧🇷 Somente vagas no Brasil
+        </label>
         <label class="toggle-row">
           <input type="checkbox" id="show-ambiguous-toggle" />
-          Mostrar vagas ambíguas (sem nível explícito, score 40)
+          ⚠️ Mostrar ambíguas (score 40) e "Verificar"
         </label>
       </div>
 
@@ -86,8 +91,13 @@
           <div class="page-title">Rastreador de Candidaturas</div>
           <div class="page-sub">Arraste os cards entre as colunas para atualizar o status</div>
         </div>
-        <button class="btn btn-secondary" onclick="loadKanban()">↺ Atualizar</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost btn-sm" id="show-stats-btn" onclick="toggleConversionStats()">📊 Conversão por fonte</button>
+          <button class="btn btn-secondary" onclick="loadKanban()">↺ Atualizar</button>
+        </div>
       </div>
+
+      <div id="conversion-bar" style="display:none"></div>
 
       <div class="kanban-board" id="kanban-board">
         <div class="loader" style="grid-column:1/-1">

@@ -94,10 +94,14 @@ JUNIOR_DESC_PATTERNS: list[str] = [
     r"no\s+experience\s+required",
 ]
 
-# Camada 4 — limiar de descarte por exigência de anos
-MAX_ALLOWED_YEARS = 3     # vagas que exigem > 3 anos → descarte
-AMBIGUOUS_MIN_SCORE = 40  # score mínimo para toggle "mostrar ambíguas"
-DEFAULT_MIN_SCORE = 50    # score mínimo na exibição padrão
+# Camada 4 — limiares de anos de experiência
+# ATUALIZAÇÃO (veredicto do conselho): empresas brasileiras escrevem requisitos
+# inflados — "2-3 anos" em vaga júnior é comum e negociável.
+# Threshold relaxado: > 4 anos → descarte; 3-4 anos → "Verificar" (score 40)
+MAX_ALLOWED_YEARS = 4       # vagas que exigem > 4 anos → descarte
+VERIFY_YEARS_THRESHOLD = 3  # vagas com 3-4 anos exigidos → verificar manualmente
+AMBIGUOUS_MIN_SCORE = 40    # score mínimo para toggle "mostrar ambíguas"
+DEFAULT_MIN_SCORE = 50      # score mínimo na exibição padrão
 
 
 # ── Compilar regex ────────────────────────────────────────────────────────────
@@ -195,11 +199,18 @@ def analyze_description(description: str) -> dict:
             seen.add(key)
             unique_signals.append(s)
 
+    # Vagas com 3-4 anos no Brasil costumam ser negociáveis — marca como "verificar"
+    needs_verify = (
+        required_years is not None
+        and VERIFY_YEARS_THRESHOLD <= required_years <= MAX_ALLOWED_YEARS
+    )
+
     return {
         "required_years": required_years,
         "years_text": years_texts[0] if years_texts else None,
         "junior_signals": unique_signals,
         "discard": discard,
+        "needs_verify": needs_verify,
     }
 
 
@@ -238,6 +249,15 @@ def compute_seniority(title: str, description: str) -> SeniorityResult:
         signals.extend(title_result["blacklist_hits"])
         return SeniorityResult(0, "Sênior/Pleno", True, signals)
 
+    # ── Vagas "Verificar": 3-4 anos exigidos (negociáveis no Brasil) ──────────
+    if desc_result.get("needs_verify"):
+        yr = desc_result["required_years"]
+        signals.append(f"⚠ exige {yr} anos — verifique se negociável")
+        if title_result["status"] == "junior":
+            signals.extend(title_result["junior_hits"])
+            return SeniorityResult(55, "Verificar", False, signals)
+        return SeniorityResult(40, "Verificar", False, signals)
+
     # ── Calcular bônus de júnior ─────────────────────────────────────────────
     desc_bonus = 0
     if desc_result["junior_signals"]:
@@ -252,7 +272,6 @@ def compute_seniority(title: str, description: str) -> SeniorityResult:
         elif yr <= 2:
             desc_bonus += 5
             signals.append(f"exige {yr} anos")
-        # yr == 3 é o limite → sem bônus, sem penalidade
 
     # ── Classificar ──────────────────────────────────────────────────────────
     if title_result["status"] == "junior":
@@ -268,5 +287,5 @@ def compute_seniority(title: str, description: str) -> SeniorityResult:
         score = min(70, 40 + desc_bonus)
         return SeniorityResult(score, "Ambíguo", False, signals)
 
-    # Fallback (não deve ocorrer normalmente)
+    # Fallback
     return SeniorityResult(50, "Ambíguo", False, signals)

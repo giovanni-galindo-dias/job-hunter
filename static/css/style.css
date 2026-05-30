@@ -551,6 +551,57 @@ main { flex: 1; padding: 24px; max-width: 1400px; margin: 0 auto; width: 100%; }
 .toast.info    { border-left: 3px solid var(--accent); }
 @keyframes slideIn { from { transform: translateX(120%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 
+/* ===== New job badge ===== */
+.new-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: rgba(79,142,247,.18);
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  animation: pulse 2s infinite;
+}
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .65; } }
+
+/* ===== BR flag ===== */
+.br-badge {
+  font-size: 14px;
+  line-height: 1;
+  title: "Vaga brasileira";
+}
+
+/* ===== Interview indicator ===== */
+.interview-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--accent2);
+  flex-shrink: 0;
+}
+
+/* ===== Verify seniority label ===== */
+.seniority-verify { background: rgba(124,92,252,.15); color: var(--accent2); }
+
+/* ===== Conversion stats (Kanban) ===== */
+.conversion-bar {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-bottom: 18px;
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.conv-metric { text-align: center; }
+.conv-metric .val { font-size: 24px; font-weight: 800; color: var(--accent); }
+.conv-metric .lbl { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
 /* ===== Source legend ===== */
 .source-legend {
   font-size: 12px;

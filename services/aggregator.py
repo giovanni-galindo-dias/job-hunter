@@ -5,37 +5,71 @@ Pipeline:
   1. Executa todos os coletores em PARALELO (asyncio.gather).
   2. Achata os resultados em uma lista única.
   3. Deduplica por (título normalizado, empresa normalizada).
-  4. Aplica filtragem de senioridade (4 camadas).
-  5. Calcula fit_score e seniority_score.
-  6. Persiste no cache SQLite (upsert por id).
-  7. Retorna vagas + estatísticas por fonte.
+  4. Geo-filter opcional: prioriza ou restringe a vagas no Brasil.
+  5. Aplica filtragem de senioridade (4 camadas).
+  6. Calcula fit_score e seniority_score.
+  7. Marca vagas com menos de 48h como "is_new" (prioridade de candidatura).
+  8. Persiste no cache SQLite (upsert por id).
+  9. Retorna vagas + estatísticas por fonte.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from sqlalchemy.orm import Session
 
-from collectors.registry import COLLECTORS
+from collectors.registry import COLLECTORS, BR_NATIVE_SOURCES
 from collectors.base import RawJob, CollectorResult
 from models import CollectedJob
 from services.matcher import score_fit
 from services.seniority_filter import compute_seniority, DEFAULT_MIN_SCORE, AMBIGUOUS_MIN_SCORE
 
 
+# ── Geo-filter ────────────────────────────────────────────────────────────────
+
+_BR_LOCATION_KW = {
+    "brasil", "brazil", "br", "são paulo", "sp", "rio de janeiro", "rj",
+    "minas gerais", "mg", "belo horizonte", "porto alegre", "curitiba",
+    "salvador", "recife", "fortaleza", "guaratinguetá", "campinas",
+    "remoto", "remote", "híbrido", "hybrid",
+}
+
+
+def _is_brazil_job(source: str, location: str) -> bool:
+    """True se a vaga é de fonte BR nativa ou a localização indica Brasil."""
+    if source in BR_NATIVE_SOURCES:
+        return True
+    loc = location.lower()
+    return any(kw in loc for kw in _BR_LOCATION_KW)
+
+
+# ── 48h detector ─────────────────────────────────────────────────────────────
+
+def _is_recent(posted_at: str) -> bool:
+    """True se a vaga foi publicada nas últimas 48 horas."""
+    if not posted_at:
+        return False
+    try:
+        posted = datetime.strptime(posted_at[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - posted) <= timedelta(hours=48)
+    except Exception:
+        return False
+
+
 # ── Deduplicação ──────────────────────────────────────────────────────────────
 
 _SOURCE_PRIORITY = {
-    "Google Jobs": 1,
-    "Adzuna":      2,
-    "JSearch":     3,
-    "Remotive":    4,
-    "RemoteOK":    5,
-    "Arbeitnow":   6,
-    "The Muse":    7,
+    "Gupy":       1,  # BR #1
+    "Google Jobs":2,
+    "Adzuna":     3,
+    "JSearch":    4,
+    "Remotive":   5,
+    "RemoteOK":   6,
+    "Arbeitnow":  7,
+    "The Muse":   8,
 }
 
 
@@ -46,11 +80,8 @@ def _norm(text: str) -> str:
 
 
 def _dedup(jobs: list[RawJob]) -> list[RawJob]:
-    """
-    Mantém uma vaga por (título_normalizado, empresa_normalizada).
-    Prefere a fonte de maior prioridade quando há duplicata.
-    """
-    seen: dict[str, RawJob] = {}
+    """Mantém uma vaga por (título_norm, empresa_norm), preferindo fonte de maior prioridade."""
+    seen: dict[tuple, RawJob] = {}
     for job in jobs:
         key = (_norm(job.title), _norm(job.company))
         if key in seen:
@@ -67,33 +98,32 @@ def _dedup(jobs: list[RawJob]) -> list[RawJob]:
 
 async def aggregate_jobs(
     show_ambiguous: bool = False,
+    brazil_only: bool = False,
     db: Session | None = None,
 ) -> dict:
     """
     Coleta vagas de todas as fontes em paralelo, filtra e retorna.
 
-    Returns:
-        jobs:             list[dict] — vagas prontas para exibição
-        source_stats:     dict — por fonte: {collected, error}
-        total_collected:  int — total antes do dedup
-        total_deduped:    int — total após dedup
-        total_filtered:   int — total após filtro de senioridade
+    brazil_only=True → descarta vagas sem localização BR (exceto fontes nativas BR)
     """
-    # Executa todos os coletores em paralelo
     tasks = [c.collect([]) for c in COLLECTORS]
     results: list[CollectorResult] = await asyncio.gather(*tasks)
 
-    # Agrega e coleta estatísticas por fonte
     all_raw: list[RawJob] = []
     source_stats: dict[str, dict] = {}
     for res in results:
         source_stats[res.name] = {
             "collected": len(res.jobs),
             "error": res.error,
+            "is_br": res.name in BR_NATIVE_SOURCES,
         }
         all_raw.extend(res.jobs)
 
     total_collected = len(all_raw)
+
+    # Geo-filter (opcional)
+    if brazil_only:
+        all_raw = [j for j in all_raw if _is_brazil_job(j.source, j.location)]
 
     # Deduplicação
     unique = _dedup(all_raw)
@@ -107,6 +137,9 @@ async def aggregate_jobs(
         if seniority.seniority_score < min_score:
             continue
         fit = score_fit(raw.title, raw.description)
+        is_br = _is_brazil_job(raw.source, raw.location)
+        is_new = _is_recent(raw.posted_at)
+
         processed.append({
             "id":               raw.job_id,
             "title":            raw.title,
@@ -116,6 +149,8 @@ async def aggregate_jobs(
             "description":      raw.description[:2000],
             "source":           raw.source,
             "posted_at":        raw.posted_at,
+            "is_br":            is_br,
+            "is_new":           is_new,
             "fit_score":        fit["fit_score"],
             "matched_skills":   fit["matched_skills"],
             "role_type":        fit["role_type"],
@@ -126,10 +161,17 @@ async def aggregate_jobs(
 
     total_filtered = len(processed)
 
-    # Ordenação: seniority DESC → fit DESC
-    processed.sort(key=lambda j: (j["seniority_score"], j["fit_score"]), reverse=True)
+    # Ordenação: novas BR primeiro → seniority DESC → fit DESC
+    processed.sort(
+        key=lambda j: (
+            j["is_new"],       # novas primeiro
+            j["is_br"],        # BR primeiro
+            j["seniority_score"],
+            j["fit_score"],
+        ),
+        reverse=True,
+    )
 
-    # Persiste no cache SQLite
     if db is not None:
         _upsert_cache(processed, db)
 
@@ -145,33 +187,30 @@ async def aggregate_jobs(
 def load_from_cache(
     db: Session,
     show_ambiguous: bool = False,
+    brazil_only: bool = False,
     sort: str = "seniority",
 ) -> dict | None:
-    """
-    Retorna vagas do cache SQLite se houver resultados.
-    Retorna None se o cache estiver vazio.
-    """
     min_score = AMBIGUOUS_MIN_SCORE if show_ambiguous else DEFAULT_MIN_SCORE
-    rows = (
-        db.query(CollectedJob)
-        .filter(CollectedJob.seniority_score >= min_score)
-        .all()
-    )
+    q = db.query(CollectedJob).filter(CollectedJob.seniority_score >= min_score)
+    if brazil_only:
+        q = q.filter(CollectedJob.is_br == True)
+    rows = q.all()
     if not rows:
         return None
 
     jobs = [_row_to_dict(r) for r in rows]
     _sort_jobs(jobs, sort)
 
-    source_counts: dict[str, int] = {}
+    source_counts: dict[str, dict] = {}
     for j in jobs:
-        source_counts[j["source"]] = source_counts.get(j["source"], 0) + 1
-
-    source_stats = {src: {"collected": cnt, "error": None} for src, cnt in source_counts.items()}
+        src = j["source"]
+        if src not in source_counts:
+            source_counts[src] = {"collected": 0, "error": None, "is_br": j.get("is_br", False)}
+        source_counts[src]["collected"] += 1
 
     return {
         "jobs":            jobs,
-        "source_stats":    source_stats,
+        "source_stats":    source_counts,
         "total_collected": len(jobs),
         "total_deduped":   len(jobs),
         "total_filtered":  len(jobs),
@@ -183,9 +222,14 @@ def _sort_jobs(jobs: list[dict], sort: str) -> None:
     if sort == "fit":
         jobs.sort(key=lambda j: j["fit_score"], reverse=True)
     elif sort == "date":
-        jobs.sort(key=lambda j: j.get("posted_at", ""), reverse=True)
-    else:
-        jobs.sort(key=lambda j: (j["seniority_score"], j["fit_score"]), reverse=True)
+        jobs.sort(key=lambda j: (j.get("is_new", False), j.get("posted_at", "")), reverse=True)
+    elif sort == "brazil":
+        jobs.sort(key=lambda j: (j.get("is_br", False), j["seniority_score"], j["fit_score"]), reverse=True)
+    else:  # seniority (padrão)
+        jobs.sort(
+            key=lambda j: (j.get("is_new", False), j.get("is_br", False), j["seniority_score"], j["fit_score"]),
+            reverse=True,
+        )
 
 
 def _upsert_cache(jobs: list[dict], db: Session) -> None:
@@ -197,6 +241,8 @@ def _upsert_cache(jobs: list[dict], db: Session) -> None:
             existing.fit_score = j["fit_score"]
             existing.seniority_score = j["seniority_score"]
             existing.seniority_label = j["seniority_label"]
+            existing.is_br = j.get("is_br", False)
+            existing.is_new = j.get("is_new", False)
         else:
             db.add(CollectedJob(
                 id=j["id"],
@@ -207,6 +253,8 @@ def _upsert_cache(jobs: list[dict], db: Session) -> None:
                 description=j["description"],
                 source=j["source"],
                 posted_at=j["posted_at"],
+                is_br=j.get("is_br", False),
+                is_new=j.get("is_new", False),
                 fit_score=j["fit_score"],
                 matched_skills=json.dumps(j["matched_skills"], ensure_ascii=False),
                 role_type=j["role_type"],
@@ -237,6 +285,8 @@ def _row_to_dict(r: CollectedJob) -> dict:
         "description":     r.description,
         "source":          r.source,
         "posted_at":       r.posted_at,
+        "is_br":           getattr(r, "is_br", False),
+        "is_new":          getattr(r, "is_new", False),
         "fit_score":       r.fit_score,
         "matched_skills":  skills,
         "role_type":       r.role_type,
