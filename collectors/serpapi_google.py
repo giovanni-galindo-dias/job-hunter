@@ -4,6 +4,7 @@ Cada query bate no índice do Google que já agrega Gupy, LinkedIn,
 Indeed, Vagas.com, InfoJobs, Catho e outros portais brasileiros.
 Obtenha sua chave gratuita em: https://serpapi.com (100 req/mês)
 """
+import logging
 import os
 import httpx
 from dotenv import load_dotenv
@@ -11,6 +12,7 @@ from collectors.base import BaseCollector, RawJob, TIMEOUT, strip_html
 from collectors.query_builder import google_jobs_queries
 
 load_dotenv()
+log = logging.getLogger("job_hunter.serpapi")
 
 
 class SerpAPIGoogleJobsCollector(BaseCollector):
@@ -21,6 +23,8 @@ class SerpAPIGoogleJobsCollector(BaseCollector):
 
     async def _fetch(self, _queries: list[str]) -> list[RawJob]:
         if not self._key:
+            log.warning("[Google Jobs] SKIPPED: SERPAPI_KEY ausente no .env — "
+                        "obtenha em https://serpapi.com (100 req/mês grátis)")
             raise RuntimeError("SERPAPI_KEY não configurada no .env")
 
         results: list[RawJob] = []

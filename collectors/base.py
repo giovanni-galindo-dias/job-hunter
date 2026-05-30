@@ -7,10 +7,14 @@ Para adicionar uma nova fonte:
   3. Registre em collectors/registry.py.
 """
 from __future__ import annotations
+import logging
+import traceback
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 import hashlib
 import re
+
+log = logging.getLogger("job_hunter.collector")
 
 
 @dataclass
@@ -50,12 +54,25 @@ class BaseCollector(ABC):
     async def _fetch(self, queries: list[str]) -> list[RawJob]: ...
 
     async def collect(self, queries: list[str]) -> CollectorResult:
-        """Executa coleta com erro isolado — nunca derruba a busca inteira."""
+        """
+        Executa _fetch com isolamento completo de erro.
+        Nunca derruba a busca inteira. Loga o traceback completo.
+        """
         try:
             jobs = await self._fetch(queries)
             return CollectorResult(name=self.name, jobs=jobs, queries_run=len(queries))
         except Exception as exc:
-            return CollectorResult(name=self.name, jobs=[], error=str(exc), queries_run=0)
+            tb = traceback.format_exc()
+            # Primeira linha do traceback é suficiente para o log resumido
+            short = str(exc)
+            log.warning("[%s] FALHOU: %s", self.name, short)
+            log.debug("[%s] traceback completo:\n%s", self.name, tb)
+            return CollectorResult(
+                name=self.name,
+                jobs=[],
+                error=short,
+                queries_run=0,
+            )
 
 
 # ── Helpers compartilhados pelos coletores ────────────────────────────────────

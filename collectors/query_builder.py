@@ -68,18 +68,28 @@ def brazil_api_queries() -> list[str]:
 
 
 def remote_queries() -> list[str]:
-    """Para Remotive, RemoteOK — vagas remotas internacionais em EN."""
+    """
+    Para Remotive, RemoteOK — vagas remotas internacionais.
+    SEMPRE em inglês: essas plataformas não indexam PT-BR.
+    """
     _, roles_en = zip(*_ROLES)
-    return [f"{en} remote" for en in roles_en[:6]] + [
-        "SQL data analyst junior remote",
-        "cloud GCP junior remote",
-        "python junior remote",
+    base = [f"{en} remote" for en in roles_en[:6]]
+    extra = [
+        "SQL junior remote",
+        "junior data analyst remote",
+        "junior cloud engineer remote",
+        "junior python developer remote",
+        "entry level support analyst remote",
     ]
+    return base + extra
 
 
 def tag_queries() -> list[str]:
-    """Tags simples para APIs baseadas em tags (RemoteOK, Arbeitnow)."""
-    return ["sql", "python", "cloud", "oracle", "gcp", "data", "support", "junior"]
+    """
+    Tags em inglês para APIs baseadas em tags (RemoteOK, Arbeitnow).
+    Não usar PT: essas plataformas são EN-only.
+    """
+    return ["sql", "python", "cloud", "oracle", "gcp", "data", "support", "junior", "entry-level"]
 
 
 def themuse_categories() -> list[str]:

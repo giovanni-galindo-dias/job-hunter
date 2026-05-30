@@ -1,3 +1,4 @@
+import logging
 import os
 import httpx
 from dotenv import load_dotenv
@@ -5,6 +6,7 @@ from collectors.base import BaseCollector, RawJob, TIMEOUT, strip_html
 from collectors.query_builder import brazil_api_queries
 
 load_dotenv()
+log = logging.getLogger("job_hunter.adzuna")
 
 
 class AdzunaCollector(BaseCollector):
@@ -16,6 +18,8 @@ class AdzunaCollector(BaseCollector):
 
     async def _fetch(self, _queries: list[str]) -> list[RawJob]:
         if not self._app_id or not self._app_key:
+            log.warning("[Adzuna] SKIPPED: ADZUNA_APP_ID/ADZUNA_APP_KEY ausentes no .env — "
+                        "obtenha em https://developer.adzuna.com (250 req/dia grátis)")
             raise RuntimeError("ADZUNA_APP_ID / ADZUNA_APP_KEY não configuradas no .env")
 
         results: list[RawJob] = []

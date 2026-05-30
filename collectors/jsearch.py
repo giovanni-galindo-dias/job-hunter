@@ -3,6 +3,7 @@ JSearch via RapidAPI — agrega LinkedIn, Indeed, Glassdoor e outros.
 Chave gratuita (200 req/mês): https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch
 Configure JSEARCH_API_KEY no .env.
 """
+import logging
 import os
 import httpx
 from dotenv import load_dotenv
@@ -10,6 +11,7 @@ from collectors.base import BaseCollector, RawJob, TIMEOUT, strip_html
 from collectors.query_builder import brazil_api_queries
 
 load_dotenv()
+log = logging.getLogger("job_hunter.jsearch")
 
 
 class JSearchCollector(BaseCollector):
@@ -20,6 +22,8 @@ class JSearchCollector(BaseCollector):
 
     async def _fetch(self, _queries: list[str]) -> list[RawJob]:
         if not self._key:
+            log.warning("[JSearch] SKIPPED: JSEARCH_API_KEY ausente no .env — "
+                        "obtenha em https://rapidapi.com (200 req/mês grátis)")
             raise RuntimeError("JSEARCH_API_KEY não configurada no .env")
 
         results: list[RawJob] = []
