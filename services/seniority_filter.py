@@ -61,18 +61,27 @@ JUNIOR_TITLE_PATTERNS: list[str] = [
     r"\bi\b",                          # "Analista I" = nível 1 (júnior)
 ]
 
-# Camada 3 — padrões para extrair anos de experiência exigidos
+# Camada 3 — padrões para extrair anos de experiência EXIGIDOS do candidato.
+# ATENÇÃO: padrões devem ser específicos o suficiente para não casar com:
+#   - "empresa com 20 anos de experiência no mercado" (referência à empresa)
+#   - "há 3 anos no mercado" (histórico, não requisito)
+# Estratégia: exigir contexto de requisito (mínimo, acima de, pelo menos, +)
 YEARS_REQ_PATTERNS: list[str] = [
-    r"(\d+)\s*\+?\s*anos?\s+de\s+experi[eê]ncia",
-    r"m[íi]nimo\s+de\s+(\d+)\s+anos?",
-    r"acima\s+de\s+(\d+)\s+anos?",
-    r"pelo\s+menos\s+(\d+)\s+anos?",
-    r"(\d+)\s+a\s+\d+\s+anos?\s+de\s+experi[eê]ncia",
-    r"(\d+)\+\s*years?\s+of\s+experience",
-    r"(\d+)\+\s*years?",
-    r"minimum\s+of\s+(\d+)\s+years?",
-    r"at\s+least\s+(\d+)\s+years?",
-    r"(\d+)\s+to\s+\d+\s+years?\s+of\s+experience",
+    # PT — requer "de experiência" ou contexto de requisito
+    r"(\d+)\s*\+\s*anos?\s+de\s+experi[eê]ncia",          # "3+ anos de experiência"
+    r"(\d+)\s+anos?\s+de\s+experi[eê]ncia",                # "3 anos de experiência" (sem +)
+    r"m[íi]nimo\s+de\s+(\d+)\s+anos?",                    # "mínimo de 3 anos"
+    r"acima\s+de\s+(\d+)\s+anos?\s+de\s+experi[eê]ncia",  # "acima de 3 anos de experiência"
+    r"pelo\s+menos\s+(\d+)\s+anos?\s+de\s+experi[eê]ncia",# "pelo menos 3 anos de experiência"
+    r"(\d+)\s+a\s+\d+\s+anos?\s+de\s+experi[eê]ncia",    # "2 a 3 anos de experiência"
+    r"experi[eê]ncia\s+de\s+(\d+)\s*\+?\s*anos?",         # "experiência de 3 anos"
+    # EN — requer "of experience" ou "minimum/at least" explícito
+    r"(\d+)\+\s*years?\s+of\s+experience",                 # "3+ years of experience"
+    r"(\d+)\s+years?\s+of\s+experience",                   # "3 years of experience"
+    r"minimum\s+(?:of\s+)?(\d+)\s+years?",                 # "minimum of 3 years"
+    r"at\s+least\s+(\d+)\s+years?",                        # "at least 3 years"
+    r"(\d+)\s+to\s+\d+\s+years?\s+of\s+experience",       # "2 to 3 years of experience"
+    r"(\d+)\+\s*yrs?\s+(?:of\s+)?exp",                    # "3+ yrs exp" (abreviado)
 ]
 
 # Camada 3 — sinais positivos de júnior na descrição
@@ -100,8 +109,10 @@ JUNIOR_DESC_PATTERNS: list[str] = [
 # Threshold relaxado: > 4 anos → descarte; 3-4 anos → "Verificar" (score 40)
 MAX_ALLOWED_YEARS = 4       # vagas que exigem > 4 anos → descarte
 VERIFY_YEARS_THRESHOLD = 3  # vagas com 3-4 anos exigidos → verificar manualmente
-AMBIGUOUS_MIN_SCORE = 40    # score mínimo para toggle "mostrar ambíguas"
-DEFAULT_MIN_SCORE = 50      # score mínimo na exibição padrão
+AMBIGUOUS_MIN_SCORE = 40    # score mínimo absoluto (abaixo = descarte)
+# DEFAULT_MIN_SCORE = AMBIGUOUS_MIN_SCORE → mostra tudo que não é sênior confirmado.
+# O UI divide por label (Júnior/Verificar/Ambíguo) — usuário decide com toggle.
+DEFAULT_MIN_SCORE = 40
 
 
 # ── Compilar regex ────────────────────────────────────────────────────────────
@@ -178,16 +189,32 @@ def analyze_description(description: str) -> dict:
     found_years: list[int] = []
     years_texts: list[str] = []
 
+    # Indicadores de que "X anos de experiência" se refere à empresa,
+    # não ao candidato — devem ser ignorados para evitar falso positivo.
+    _COMPANY_CONTEXT = [
+        "empresa", "no mercado", "de atuação no", "de história",
+        "fundad", "somos", "há no mercado", "anos no mercado",
+    ]
+
     for pat in _YEARS_RE:
         for m in pat.finditer(description):
             try:
-                found_years.append(int(m.group(1)))
+                yr = int(m.group(1))
+                # Janela de contexto em torno do match
+                ctx_start = max(0, m.start() - 40)
+                ctx_end   = min(len(description), m.end() + 40)
+                context   = description[ctx_start:ctx_end].lower()
+                # Ignora se contexto indica experiência da empresa
+                if any(ind in context for ind in _COMPANY_CONTEXT):
+                    continue
+                found_years.append(yr)
                 years_texts.append(m.group(0).strip())
             except (IndexError, ValueError):
                 pass
 
     required_years = max(found_years) if found_years else None
     discard = required_years is not None and required_years > MAX_ALLOWED_YEARS
+
 
     junior_signals = [m.group() for m in _JUNIOR_DESC_RE.finditer(description)]
     # Deduplica mantendo ordem

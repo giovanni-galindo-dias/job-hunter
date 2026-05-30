@@ -98,10 +98,17 @@ class TestAnalyzeDescription:
         assert result["discard"] is True
         assert result["required_years"] == 5
 
-    def test_4_anos_deve_descartar(self):
+    def test_4_anos_nao_descarta_vai_para_verificar(self):
+        # MAX_ALLOWED_YEARS=4: "4 anos" está no limite → needs_verify=True, discard=False
         result = analyze_description("Mínimo de 4 anos de experiência.")
-        assert result["discard"] is True
+        assert result["discard"] is False
+        assert result["needs_verify"] is True
         assert result["required_years"] == 4
+
+    def test_5_anos_deve_descartar(self):
+        result = analyze_description("Mínimo de 5 anos de experiência.")
+        assert result["discard"] is True
+        assert result["required_years"] == 5
 
     def test_2_anos_nao_deve_descartar(self):
         result = analyze_description("Até 2 anos de experiência.")
@@ -229,3 +236,110 @@ class TestInjectJuniorTerms:
     def test_keyword_trainee_nao_recebe_junior(self):
         result = inject_junior_terms("trainee backend")
         assert result == "trainee backend"
+
+
+# ── Testes adicionais — regressões específicas ────────────────────────────────
+
+class TestRegressions:
+    """
+    Testes exigidos pelo prompt de correção de bugs:
+      - Falso positivo de regex "há N anos no mercado"
+      - Geo-filter: fonte BR sem location ainda é BR
+      - query_builder: fontes EN recebem queries EN
+      - 3-4 anos → "Verificar", não descartado
+    """
+
+    def test_ha_n_anos_no_mercado_nao_e_falso_positivo(self):
+        """
+        "há 2 anos no mercado" descreve a empresa, não requisito do candidato.
+        Não deve aumentar required_years.
+        """
+        from services.seniority_filter import analyze_description
+        desc = "Empresa fundada há 2 anos no mercado de tecnologia. Buscamos analista júnior."
+        result = analyze_description(desc)
+        # Não deve detectar "2 anos" como requisito do candidato
+        assert result["required_years"] is None or result["required_years"] == 0 or result["discard"] is False
+
+    def test_empresa_com_20_anos_nao_descarta_candidato(self):
+        """
+        "empresa com 20 anos de experiência no mercado" NÃO deve descartar a vaga.
+        O padrão correto exige "X anos de experiência" no contexto do candidato.
+        """
+        from services.seniority_filter import analyze_description
+        desc = (
+            "Somos uma empresa com 20 anos de experiência no mercado odontológico. "
+            "Buscamos analista júnior para início de carreira."
+        )
+        result = analyze_description(desc)
+        # Deve detectar sinal positivo de júnior
+        assert result["junior_signals"]
+        # A vaga não deve ser descartada por causa do "20 anos" da empresa
+        assert result["discard"] is False
+
+    def test_3_anos_exigidos_gera_verificar_nao_descarta(self):
+        """
+        "mínimo de 3 anos de experiência" → seniority_label = "Verificar", não "Sênior/Pleno".
+        Empresas brasileiras inflam requisitos — 3 anos é negociável.
+        """
+        result = compute_seniority(
+            "Analista de Suporte Técnico",
+            "Requisitos: mínimo de 3 anos de experiência em suporte de TI. "
+            "Conhecimento em SQL e ServiceNow.",
+        )
+        assert result.seniority_label == "Verificar"
+        assert result.discard is False
+        assert result.seniority_score >= 40
+
+    def test_4_anos_exigidos_gera_verificar_nao_descarta(self):
+        """4 anos ainda é dentro do threshold de "verificar"."""
+        from services.seniority_filter import analyze_description
+        result = analyze_description("Requisito: 4 anos de experiência em Oracle Database.")
+        assert result["needs_verify"] is True
+        assert result["discard"] is False
+
+    def test_5_anos_exigidos_descarta(self):
+        """5 anos > MAX_ALLOWED_YEARS=4 → deve descartar."""
+        result = compute_seniority(
+            "Desenvolvedor Backend",
+            "Buscamos profissional com 5 anos de experiência em Python.",
+        )
+        assert result.seniority_score == 0
+        assert result.discard is True
+
+    def test_gupy_sem_location_ainda_e_br(self):
+        """
+        Vagas do Gupy (fonte BR nativa) com location vazia
+        devem ser classificadas como brasileiras pelo geo-filter.
+        """
+        from services.aggregator import _is_brazil_job
+        # Fonte Gupy com location vazia → ainda é BR
+        assert _is_brazil_job("Gupy", "") is True
+        assert _is_brazil_job("Gupy", "São Paulo, SP, Brasil") is True
+        # Fonte internacional sem location → não é BR
+        assert _is_brazil_job("Arbeitnow", "") is False
+        # Fonte internacional com location BR → é BR
+        assert _is_brazil_job("Arbeitnow", "São Paulo, SP, Brasil") is True
+        assert _is_brazil_job("Remotive", "Brasil") is True
+
+    def test_query_builder_remote_queries_sao_em_ingles(self):
+        """
+        remote_queries() deve retornar apenas queries em inglês
+        para fontes internacionais que não entendem PT-BR.
+        """
+        from collectors.query_builder import remote_queries
+        queries = remote_queries()
+        pt_words = ["analista", "estagiário", "júnior", "sustentação", "dados"]
+        for q in queries:
+            for pt in pt_words:
+                assert pt.lower() not in q.lower(), (
+                    f"Query {q!r} contém termo PT-BR {pt!r} — "
+                    "fontes internacionais não entendem PT"
+                )
+
+    def test_plsql_no_titulo_nao_blacklistado_por_pl(self):
+        """
+        "Desenvolvedor PL/SQL" NÃO deve ser descartado pelo padrão 'pl' da blacklist.
+        (Regressão: 'pl' de 'pleno' não deve casar com 'pl' de 'pl/sql')
+        """
+        result = check_title_seniority("Desenvolvedor PL/SQL Oracle")
+        assert result["status"] != "senior"

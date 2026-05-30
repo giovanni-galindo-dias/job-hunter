@@ -103,9 +103,9 @@ async function loadKanbanIds() {
 }
 
 async function searchJobs(useCache = false) {
-  const sortBy       = $("#sort-select").value;
-  const showAmb      = $("#show-ambiguous-toggle").checked;
-  const brazilOnly   = $("#brazil-only-toggle").checked;
+  const sortBy     = $("#sort-select").value;
+  const showAmb    = $("#show-ambiguous-toggle").checked;
+  const brazilOnly = $("#brazil-only-toggle").checked;
 
   const label = useCache
     ? "Carregando do cache…"
@@ -128,12 +128,25 @@ async function searchJobs(useCache = false) {
     });
     const data = await apiFetch(`${endpoint}?${params}`);
     allJobs = data.jobs || [];
+
+    // Se cache vazio, dispara busca real automaticamente
+    if (useCache && allJobs.length === 0 && data.message) {
+      toast("Cache vazio — iniciando busca nas APIs…", "info");
+      return searchJobs(false);
+    }
+
+    // Timestamp da última busca
+    const now = new Date().toLocaleTimeString("pt-BR", {hour:"2-digit", minute:"2-digit"});
+    const src = useCache ? "cache" : "APIs";
+    const lbl = $("#last-search-label");
+    if (lbl) lbl.textContent = `Última busca: ${now} via ${src} — ${allJobs.length} vagas`;
+
     renderJobs(allJobs, data.stats || {});
   } catch (_) {
     $("#jobs-grid").innerHTML = `<div class="empty-state" style="grid-column:1/-1">
       <div class="empty-icon">⚠️</div>
       <strong>Não foi possível buscar as vagas.</strong>
-      <p>Configure ao menos uma chave de API no .env (SerpAPI recomendado) e busque novamente.</p>
+      <p>Verifique sua conexão. Fontes gratuitas: Gupy, Arbeitnow, Remotive, RemoteOK não precisam de chave.</p>
     </div>`;
   }
 }
